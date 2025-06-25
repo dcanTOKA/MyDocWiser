@@ -1,58 +1,90 @@
+# 📚 Docwiser: Modular RAG Pipeline for Developer Documentation
 
-# README for Docwiser Project
+**Docwiser** is a modular, orchestrated RAG (Retrieval-Augmented Generation) system designed for accurate and auditable question answering over developer documentation. It uses a LangGraph-based execution graph, LLMs for document understanding and query refinement, and vector stores like Pinecone for semantic search. The pipeline automatically scrapes, chunks, embeds, and retrieves documentation content from any developer website.
 
-## Overview
+---
 
-Docwiser is a comprehensive solution for scraping, ingesting, and retrieving documents powered by the cutting-edge capabilities of LangChain and integrated with Pinecone for efficient retrieval. The project automates the process of collecting documents from specified URLs, converting them into a manageable format, and indexing them for quick retrieval using natural language queries. It is particularly useful for handling large volumes of text data and making it easily accessible through simple queries.
+## 🚀 Key Features
 
-The project is set up to handle multiple operations:
-1. **Scraping**: Automatically download documents from a specified link, with the ability to ignore certain prefixes.
-2. **Ingestion**: Process and store the scraped documents into a Pinecone index for efficient search and retrieval.
-3. **Retrieval**: Execute natural language queries to retrieve relevant information from the indexed documents.
+- 🕸️ **Pattern-Aware Scraping**  
+  Extracts only relevant documentation URLs using a lightweight Qwen3 model over anchor tag patterns.
 
-These operations can be managed by altering the `MODE` in the `main.py` script.
+- 📄 **Semantic Document Ingestion**  
+  Recursive chunking and OpenAI embeddings stored in Pinecone under namespaced indices.
 
-## .env File Configuration
+- 🔄 **LangGraph-Based Orchestration**  
+  Dynamically determines whether to scrape, ingest, or retrieve based on current state.
 
-Create a `.env` file in the root directory of the project with the following parameters:
+- 💬 **LLM-Based Answering**  
+  GPT-4.1-mini generates markdown answers grounded in retrieved sources with rephrased query logs.
 
-- `OPENAI_API_KEY`: Your OpenAI API key for accessing GPT models.
-- `SCRAPE_DOCS_LINK`: The URL from where the documents should be scraped.
-- `IGNORE_PREFIXES`: Prefixes of URLs to ignore during the scraping process.
-- `DOCUMENTS_OUTPUT_DIR`: The directory where scraped documents will be saved.
-- `PINECONE_API_KEY`: Your Pinecone API key for accessing Pinecone services.
-- `INDEX_NAME`: The name of the Pinecone index where documents will be stored.
-- `RETRIEVAL_QA_CHAT_PROMPT`: The prompt used for querying the document index in natural language.
-- `CHUNK_SIZE`: The size of text chunks to be indexed; this controls the granularity of search.
-- `CHUNK_OVERLAP`: The overlap between consecutive chunks to ensure continuity in the context.
+- 📑 **Markdown Reporting**  
+  Each query response is returned with a fully traceable markdown log for transparency and reproducibility.
 
-## `main.py` Usage
+---
 
-The `main.py` script is the central executable for Docwiser, structured to handle three primary modes:
+## 📦 Prerequisites
 
-- `scrape`: Downloads and processes documents from the specified URL into the defined output directory.
-- `ingest`: Processes and uploads the documents to a Pinecone index for later retrieval.
-- `retrieve`: Retrieves answers to queries based on the content available in the Pinecone index.
+Ensure the following services are up and running before starting the system:
 
-To switch between these operations, update the `MODE` variable in the `main.py` file:
+| Component | Required | Description |
+|----------|----------|-------------|
+| 🟢 MongoDB | Yes | Running at `mongodb://localhost:27017` |
+| 🟢 Ollama | Yes | Running with Qwen3 model (`ollama run qwen3:0.6b`) |
+| 🟢 Pinecone | Yes | API key and an active index configured |
 
-```python
-MODE = "scrape"  # Options: "scrape", "ingest", "retrieve"
+---
+
+## 🛠️ Installation
+
+```bash
+# Clone and enter project
+git clone https://github.com/your-org/docwiser.git
+cd docwiser
+
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-#### Sample Code
-```python
-async def main():
-    if MODE == "scrape":
-        scrape_service = ScrapeDocumentService(settings)
-        await scrape_service.scrape()
-    elif MODE == "ingest":
-        ingestion_service = IngestionDocumentsService()
-        ingestion_service.ingest()
-    elif MODE == "retrieve":
-        retrieval_service = RetrievalQAService()
-        res = retrieval_service.query("How to cluster points in Point Cloud using open3d?")
-        print(res)
-    else:
-        raise ValueError("Invalid mode operation.")
+## ⚙️ Environment Configuration
+
+Before running the system, create a `.env` file in the project root with the following contents:
+
+```env
+# OpenAI API Key
+OPENAI_API_KEY=your_openai_api_key
+
+# Pinecone Configuration
+PINECONE_API_KEY=your_pinecone_key
+INDEX_NAME=docwiser-index
+RETRIEVAL_QA_CHAT_PROMPT=langchain-ai/retrieval-qa-chat
+
+# Ollama Configuration (LLM for pattern discovery)
+OLLAMA_MODEL=qwen3:0.6b
+OLLAMA_HOST=http://localhost:11434
+
+# MongoDB Configuration
+MONGO_URL=mongodb://localhost:27017
+
+# Scraping Behavior
+IGNORE_PREFIXES=["cpp_api","c_api"]
+DOCUMENTS_OUTPUT_DIR=documents
+SCRAPE_MAX_DEPTH=2
+SCRAPE_MAX_PAGES=100
+PATTERN_BATCH_SIZE=10
+
+# Ingestion Parameters
+CHUNK_SIZE=1000
+CHUNK_OVERLAP=100
 ```
+
+## ▶️ Running the System
+
+To start the Docwiser pipeline and launch the Gradio interface:
+
+```bash
+python main.py
