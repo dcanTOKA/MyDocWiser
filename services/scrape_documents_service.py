@@ -1,82 +1,152 @@
-from playwright.async_api import async_playwright
 import os
-from tqdm.asyncio import tqdm
-from urllib.parse import urlparse
+from typing import List, Set
+from urllib.parse import urlparse, urldefrag
+
+from playwright.async_api import async_playwright, Page
+from tqdm import tqdm
 
 from models.settings import Settings
-from utils.get_unique_document_name import get_unique_filename
+from repositories.library_status_repository import LibraryStatusRepository
+from services.ollama_model_service import OllamaPathPatternService
 from utils.get_domain import get_main_domain
+from utils.get_unique_document_name import get_unique_filename
+from utils.log_util import get_logger
+
+logger = get_logger("ScrapeService")
 
 
 class ScrapeDocumentService:
-    def __init__(self, settings: Settings):
-        self.start_url = settings.scrape_docs_link
+    def __init__(self, settings_: Settings, start_url):
+        self.start_url = start_url
+        self.settings_ = settings_
         self.base_url = urlparse(self.start_url).netloc
-        self.documents_reference_path = urlparse(self.start_url).path
-        self.personalized_folder_name = get_main_domain(self.start_url)
-        self.checked = set()
-        self.not_checked = {self.start_url}
-        self.ignore_prefixes = settings.ignore_prefixes
-        self.output_dir = os.path.join(os.getcwd(), settings.documents_output_dir, self.personalized_folder_name)
+        self.ignore_prefixes = settings_.ignore_prefixes
+        self.main_domain = get_main_domain(self.start_url)
+        self.output_dir = os.path.join(os.getcwd(), settings_.documents_output_dir, self.main_domain)
 
         os.makedirs(self.output_dir, exist_ok=True)
 
-    def is_same_domain(self, url) -> bool:
-        return self.base_url == urlparse(url).netloc
+        self.checked: Set[str] = set()
+        self.not_checked: Set[str] = {self.start_url}
+        self.patterns: List[str] = []
 
-    @staticmethod
-    async def fetch_page(page, url: str) -> str:
-        await page.goto(url)
-        return await page.content()
+        self.total_scraped: int = 0
 
-    @staticmethod
-    async def save_document(page, content: str, filename: str):
-        await page.set_content(content)
-        await page.add_style_tag(content='body { margin: 0; padding: 0; }')
-        await page.pdf(path=filename, margin={'top': '0mm', 'bottom': '0mm', 'left': '0mm', 'right': '0mm'})
+    def is_same_domain(self, url: str) -> bool:
+        return urlparse(url).netloc == self.base_url
 
-    @staticmethod
-    def should_ignore(url, ignore_prefixes) -> bool:
+    def should_ignore(self, url: str) -> bool:
         path = urlparse(url).path
-        return any(prefix in path for prefix in ignore_prefixes)
+        return any(prefix in path for prefix in self.ignore_prefixes)
 
-    async def get_links(self, page) -> set:
-        links = set(await page.evaluate("""() => {
+    def matches_pattern(self, url: str) -> bool:
+        path = urlparse(url).path
+        return any(path.startswith(p.rstrip("*")) for p in self.patterns)
+
+    def normalize_url(self, url: str) -> str:
+        clean_url, _ = urldefrag(url)
+        return clean_url
+
+    async def extract_hrefs(self, page: Page) -> List[str]:
+        links = await page.evaluate("""() => {
             return Array.from(document.querySelectorAll('a[href]')).map(a => a.href);
-        }"""))
+        }""")
+        return [
+            self.normalize_url(link)
+            for link in links
+            if link.startswith(('http', 'https')) and self.is_same_domain(link)
+        ]
 
-        filtered_links = {link for link in links
-                          if link.startswith(('http', 'https')) and link.endswith('.html') and
-                          self.is_same_domain(link)}
+    async def fetch_and_save(self, page: Page, url: str) -> str:
+        try:
+            await page.goto(url)
+            html = await page.content()
+            filename = get_unique_filename(url, self.output_dir)
+            await page.set_content(html)
+            await page.add_style_tag(content='body { margin: 0; padding: 0; }')
+            await page.pdf(path=filename, margin={'top': '0mm', 'bottom': '0mm', 'left': '0mm', 'right': '0mm'})
+            return html
+        except Exception as e:
+            logger.warning(f"[❌] Failed to fetch {url}: {e}")
+            return ""
 
-        return {link for link in filtered_links if not self.should_ignore(link, self.ignore_prefixes)}
+    async def initialize_patterns(self):
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            try:
+                page = await browser.new_page()
+                await page.goto(self.start_url)
+
+                all_links = await self.extract_hrefs(page)
+                parsed_paths = [urlparse(link).path for link in all_links]
+
+                pattern_service = OllamaPathPatternService(self.settings_)
+                self.patterns = await pattern_service.extract_patterns_from_batches(
+                    hrefs=parsed_paths,
+                    batch_size=self.settings_.pattern_batch_size
+                )
+            finally:
+                await browser.close()
 
     async def scrape(self):
-        if not os.path.exists(self.output_dir):
-            os.makedirs(self.output_dir)
+        logger.info(f"🚀 Starting scrape at: {self.start_url}")
+        logger.info(f"📁 Output directory: {self.output_dir}")
+
+        await self.initialize_patterns()
+        logger.info("📁 Extracted Path Patterns:")
+        for pattern in self.patterns:
+            logger.info(f"- {pattern}")
 
         async with async_playwright() as p:
             browser = await p.chromium.launch()
-            page = await browser.new_page()
+            try:
+                page = await browser.new_page()
 
-            progress = tqdm(total=1, desc="Total URLs to check", leave=True)
+                depth = 0
+                total_scraped = 0
 
-            while self.not_checked:
-                current_url = self.not_checked.pop()
-                self.checked.add(current_url)
-                progress.set_description(f"Scraping: {current_url}")
-                progress.update(1)
-                try:
-                    html_content = await self.fetch_page(page, current_url)
-                    output_filename = get_unique_filename(current_url, self.output_dir)
-                    await self.save_document(page, html_content, output_filename)
-                    new_links = await self.get_links(page)
-                    # Add only new and not already checked links
-                    new_not_checked = new_links - self.checked - self.not_checked
-                    self.not_checked.update(new_not_checked)
-                    progress.total += len(new_not_checked)
-                except Exception as e:
-                    print(f"Failed to fetch {current_url}: {e}")
+                while self.not_checked and depth <= self.settings_.scrape_max_depth and total_scraped < self.settings_.scrape_max_pages:
+                    current_batch = list(self.not_checked)
+                    self.not_checked.clear()
 
-            progress.close()
-            await browser.close()
+                    progress = tqdm(desc=f"🌐 Depth {depth}", total=len(current_batch))
+
+                    for url in current_batch:
+                        if total_scraped >= self.settings_.scrape_max_pages:
+                            break
+                        url = self.normalize_url(url)
+
+                        if url in self.checked:
+                            continue
+
+                        self.checked.add(url)
+                        progress.set_description(f"🔎 Crawling: {url}")
+                        progress.update(1)
+
+                        html = await self.fetch_and_save(page, url)
+                        if not html:
+                            continue
+
+                        raw_links = await self.extract_hrefs(page)
+                        filtered_links = [
+                            self.normalize_url(link)
+                            for link in raw_links
+                            if self.matches_pattern(link) and not self.should_ignore(link)
+                        ]
+
+                        self.not_checked.update({link for link in filtered_links if link not in self.checked})
+                        total_scraped += 1
+
+                    depth += 1
+                    progress.close()
+
+                self.total_scraped = total_scraped
+                logger.info(f"✅ Scraping complete. Total pages visited: {total_scraped}")
+
+                await LibraryStatusRepository.upsert_scrape_done(
+                    library=get_main_domain(self.start_url, True),
+                    domain=self.start_url,
+                    num_pages=total_scraped
+                )
+            finally:
+                await browser.close()
